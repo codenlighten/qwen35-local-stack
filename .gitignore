@@ -1,0 +1,10 @@
+# Model weights - 25 GB, fetched by install.sh from Hugging Face
+models/*
+!models/SHA256SUMS.txt
+
+.venv/
+.venv-hf/
+__pycache__/
+*.pyc
+*.log
+resume.md

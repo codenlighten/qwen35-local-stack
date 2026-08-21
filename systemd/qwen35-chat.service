@@ -1,0 +1,14 @@
+[Unit]
+Description=Qwen3.5 chat UI + OpenAI-compatible API on :__PORT__
+After=ollama-qwen35.service
+Wants=ollama-qwen35.service
+
+[Service]
+Type=simple
+WorkingDirectory=__DIR__
+ExecStart=/usr/bin/python3 __DIR__/chat.py --port __PORT__
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
