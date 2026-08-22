@@ -15,24 +15,67 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 OLLAMA = "http://127.0.0.1:11435"
 
-# Friendly alias -> real ollama tag. Aliases keep the UI and API stable
-# even if the underlying tags get re-imported under different names.
+# Friendly alias -> candidate ollama tags, most preferred first. The first
+# candidate is the name install.sh registers; the rest are tags from earlier
+# hand-imports, kept so an existing machine keeps working without re-importing
+# 25 GB. Resolution checks what ollama actually has, because an alias pointing
+# at a tag that was never created is a 404 on every request.
 MODELS = {
-    "qwen35-fast":   {"tag": "qwen3_5_9b_iq3:latest",      "ctx": 65536, "vision": False},
-    "qwen35-quality":{"tag": "qwen35-defiant-q4km:latest", "ctx": 16384, "vision": False},
-    "qwen35-vision": {"tag": "qwen35-vision:latest",       "ctx": 16384, "vision": True},
+    "qwen35-fast":    {"tags": ["qwen35-fast", "qwen3_5_9b_iq3"],
+                       "ctx": 65536, "vision": False},
+    "qwen35-quality": {"tags": ["qwen35-quality", "qwen35-defiant-q4km"],
+                       "ctx": 16384, "vision": False},
+    "qwen35-vision":  {"tags": ["qwen35-vision"], "ctx": 16384, "vision": True},
+    "qwen35-q6":      {"tags": ["qwen35-q6"], "ctx": 16384, "vision": False},
+    "qwen35-q8":      {"tags": ["qwen35-q8"], "ctx": 16384, "vision": False},
 }
 DEFAULT_MODEL = "qwen35-fast"
 
+_tag_cache = {"at": 0.0, "tags": frozenset()}
+
+
+def installed_tags(max_age=30.0):
+    """Tags ollama currently has, with and without the :latest suffix.
+
+    Cached briefly: every completion resolves a model, and `ollama list` is not
+    free. A failed lookup returns an empty set, which makes resolve() fall back
+    to the preferred tag and produce a clean upstream 404 naming it.
+    """
+    now = time.time()
+    if now - _tag_cache["at"] < max_age:
+        return _tag_cache["tags"]
+    tags = set()
+    try:
+        data = json.loads(urllib.request.urlopen(f"{OLLAMA}/api/tags", timeout=5).read())
+        for m in data.get("models", []):
+            name = m.get("name") or m.get("model") or ""
+            if name:
+                tags.add(name)
+                tags.add(name.split(":")[0])
+    except Exception:
+        pass
+    _tag_cache.update(at=now, tags=frozenset(tags))
+    return _tag_cache["tags"]
+
 
 def resolve(name):
-    """Accept an alias or a raw ollama tag."""
+    """Accept an alias or a raw ollama tag; return a spec with a usable tag."""
+    have = installed_tags()
     if name in MODELS:
-        return MODELS[name]
-    for alias, spec in MODELS.items():
-        if spec["tag"] == name or spec["tag"].split(":")[0] == name:
-            return spec
+        spec = MODELS[name]
+        tag = next((t for t in spec["tags"] if t in have), spec["tags"][0])
+        return {**spec, "tag": tag}
+    for spec in MODELS.values():
+        if any(name == t or name.split(":")[0] == t for t in spec["tags"]):
+            tag = next((t for t in spec["tags"] if t in have), spec["tags"][0])
+            return {**spec, "tag": tag}
     return {"tag": name, "ctx": 8192, "vision": False}
+
+
+def available():
+    """Aliases that resolve to a tag ollama actually has."""
+    have = installed_tags()
+    return {a: s for a, s in MODELS.items() if any(t in have for t in s["tags"])}
 
 
 def ollama_chat(payload, stream):
@@ -110,20 +153,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, HTML, "text/html; charset=utf-8")
         if self.path == "/v1/models":
             now = int(time.time())
+            # Only aliases backed by a tag ollama has. Listing a model that
+            # cannot be loaded is worse than not listing it: clients pick it.
+            listed = available() or MODELS
             return self._send(200, {
                 "object": "list",
                 "data": [
                     {"id": a, "object": "model", "created": now, "owned_by": "local",
-                     "context_length": s["ctx"], "vision": s["vision"]}
-                    for a, s in MODELS.items()
+                     "context_length": s["ctx"], "vision": s["vision"],
+                     "tag": resolve(a)["tag"]}
+                    for a, s in listed.items()
                 ],
             })
         if self.path == "/healthz":
             try:
                 urllib.request.urlopen(f"{OLLAMA}/api/version", timeout=3).read()
-                return self._send(200, {"ok": True, "ollama": OLLAMA})
             except Exception as e:
                 return self._send(503, {"ok": False, "error": str(e)})
+            have = installed_tags(max_age=0)
+            missing = [a for a, sp in MODELS.items()
+                       if not any(t in have for t in sp["tags"])]
+            return self._send(200, {"ok": True, "ollama": OLLAMA,
+                                    "models": sorted(available()),
+                                    "unavailable": missing})
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -186,6 +238,15 @@ class Handler(BaseHTTPRequestHandler):
         if not stream:
             raw = json.loads(ollama_chat(payload, False).read())
             msg = raw.get("message", {})
+            # `reasoning_budget` widens num_predict; it cannot cap the thinking
+            # block. A model that ruminates to the ceiling returns no answer at
+            # all - empty content with finish_reason "length". Retry once
+            # without thinking rather than handing the client nothing.
+            if (payload.get("think") and raw.get("done_reason") == "length"
+                    and not (msg.get("content") or "").strip()):
+                payload = {**payload, "think": False}
+                raw = json.loads(ollama_chat(payload, False).read())
+                msg = raw.get("message", {})
             out = {"role": "assistant", "content": msg.get("content", "")}
             if msg.get("thinking"):
                 out["reasoning_content"] = msg["thinking"]
@@ -200,35 +261,50 @@ class Handler(BaseHTTPRequestHandler):
 
         # streaming
         self._stream_start()
-        resp = ollama_chat(payload, True)
         first = True
-        for line in resp:
-            line = line.strip()
-            if not line:
-                continue
-            ev = json.loads(line)
-            msg = ev.get("message", {}) or {}
-            delta = {}
-            if first:
-                delta["role"] = "assistant"
-                first = False
-            if msg.get("thinking"):
-                delta["reasoning_content"] = msg["thinking"]
-            if msg.get("content"):
-                delta["content"] = msg["content"]
-            if delta:
-                self._sse({"id": cid, "object": "chat.completion.chunk", "created": created,
-                           "model": model_id,
-                           "choices": [{"index": 0, "delta": delta, "finish_reason": None}]})
-            if ev.get("done"):
-                pt = ev.get("prompt_eval_count", 0) or 0
-                ct = ev.get("eval_count", 0) or 0
-                self._sse({"id": cid, "object": "chat.completion.chunk", "created": created,
-                           "model": model_id,
-                           "choices": [{"index": 0, "delta": {},
-                                        "finish_reason": "length" if ev.get("done_reason") == "length" else "stop"}],
-                           "usage": {"prompt_tokens": pt, "completion_tokens": ct,
-                                     "total_tokens": pt + ct}})
+        # Same recovery as the non-streaming path. Safe to retry mid-stream:
+        # this only fires when no content delta has been sent, so the client has
+        # seen reasoning and nothing else.
+        for attempt in range(2):
+            resp = ollama_chat(payload, True)
+            sent_content = False
+            retry = False
+            for line in resp:
+                line = line.strip()
+                if not line:
+                    continue
+                ev = json.loads(line)
+                msg = ev.get("message", {}) or {}
+                delta = {}
+                if first:
+                    delta["role"] = "assistant"
+                    first = False
+                if msg.get("thinking"):
+                    delta["reasoning_content"] = msg["thinking"]
+                if msg.get("content"):
+                    delta["content"] = msg["content"]
+                    sent_content = True
+                if delta:
+                    self._sse({"id": cid, "object": "chat.completion.chunk", "created": created,
+                               "model": model_id,
+                               "choices": [{"index": 0, "delta": delta, "finish_reason": None}]})
+                if ev.get("done"):
+                    hit_ceiling = ev.get("done_reason") == "length"
+                    if (attempt == 0 and payload.get("think")
+                            and hit_ceiling and not sent_content):
+                        payload = {**payload, "think": False}
+                        retry = True
+                        break
+                    pt = ev.get("prompt_eval_count", 0) or 0
+                    ct = ev.get("eval_count", 0) or 0
+                    self._sse({"id": cid, "object": "chat.completion.chunk", "created": created,
+                               "model": model_id,
+                               "choices": [{"index": 0, "delta": {},
+                                            "finish_reason": "length" if hit_ceiling else "stop"}],
+                               "usage": {"prompt_tokens": pt, "completion_tokens": ct,
+                                         "total_tokens": pt + ct}})
+                    break
+            if not retry:
                 break
         self._sse("[DONE]")
 
