@@ -74,6 +74,12 @@ ad-hoc use, but is no longer needed to bring the stack up.
 | `qwen35-quality` | Q4_K_M 6.4 GB  | 16K | ~33 tok/s |
 | `qwen35-vision`  | IQ3_M + mmproj-F16 | 8K | ~34 tok/s |
 
+These aliases are what `install.sh` registers and what the API serves. Machines
+set up before the installer existed carry older tags (`qwen3_5_9b_iq3`,
+`qwen35-defiant-q4km`); those still resolve, and re-running `install.sh` aliases
+them to the canonical names with `ollama cp`, which copies metadata rather than
+blobs. `GET /healthz` lists which aliases resolve and which do not.
+
 `MTP-Q8_0` (11 GB) is archived for future hardware — it does not fit this 8 GB card.
 
 Speed is governed almost entirely by whether all 33 layers fit in VRAM. Once layers
@@ -108,8 +114,24 @@ reasoning allowance on top (default 2048, override with `reasoning_budget`).
 Without that, a small `max_tokens` gets eaten entirely by the thinking block and
 returns empty content with `finish_reason: length`.
 
-Disable thinking per request with `extra_body={"think": False}` — much faster for
-simple extraction and classification work.
+**`reasoning_budget` widens the ceiling; it cannot cap the thinking block.**
+Ollama has no separate reasoning limit — `num_predict` counts thinking and answer
+together — so a model that ruminates can still spend the entire budget and emit
+no answer. Measured on IQ3_M with a code-generation prompt: `think` on burned
+4100 tokens and returned empty content; the same prompt with `think: false`
+produced the full answer in 866 tokens.
+
+The server now recovers from that automatically: if a request finishes with
+`length` and no content, it is retried once with thinking off. In streaming this
+only fires before any content delta has been sent, so a client sees reasoning
+followed by the real answer, never a truncated one.
+
+For long structured output — code generation, JSON with a large string field —
+send `extra_body={"think": False}` directly rather than relying on the retry. It
+is roughly twice as fast and avoids the wasted first attempt. Keep thinking on
+for short answers where the reasoning is the point.
+
+Disable thinking per request with `extra_body={"think": False}`.
 
 ## Integrity
 

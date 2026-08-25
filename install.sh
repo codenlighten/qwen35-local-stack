@@ -135,6 +135,30 @@ for b in "$STEM-IQ3_M.gguf" "$STEM-Q4_K_M.gguf" "$STEM-Q6_K.gguf"; do
   [ -s "$MODELS/$b" ] && { register qwen35-vision "$b" mmproj-F16.gguf; break; }
 done
 
+# Older hand-imported tags: alias them to the canonical names so chat.py and
+# run-qwen35.sh resolve the same models on every machine. `ollama cp` copies
+# metadata, not blobs, so this costs nothing on disk.
+have_tag(){ "$OLLAMA" list 2>/dev/null | awk 'NR>1{sub(/:.*/,"",$1); print $1}' | grep -qx "$1"; }
+alias_legacy(){ # canonical legacy
+  have_tag "$1" && return 0
+  have_tag "$2" || return 0
+  echo "  alias $2 -> $1"
+  "$OLLAMA" cp "$2" "$1" >/dev/null 2>&1 || warn "could not alias $2 -> $1"
+}
+say "Reconciling model names"
+alias_legacy qwen35-fast    qwen3_5_9b_iq3
+alias_legacy qwen35-quality qwen35-defiant-q4km
+
+# The API serves aliases, so an alias with no backing tag is a 404 on every
+# request. Catch that here rather than at first use.
+say "Verifying the aliases the API serves"
+MISSING=0
+for a in qwen35-fast qwen35-quality qwen35-vision; do
+  if have_tag "$a"; then echo "  ok       $a"
+  else warn "missing  $a - the API will 404 for it"; MISSING=1; fi
+done
+[ "$MISSING" = 0 ] || warn "run '$OLLAMA list' and check the register step above"
+
 # ---------------------------------------------------------------- services
 say "Installing systemd user services"
 mkdir -p "$HOME/.config/systemd/user"

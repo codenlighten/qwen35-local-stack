@@ -20,15 +20,27 @@ start() {
   echo "server failed to start; see /tmp/ollama-qwen35.log" >&2; exit 1
 }
 
+# Prefer the tag install.sh registers, falling back to older hand-imported
+# names so a machine set up before the installer existed still works.
+pick() {
+  local have t
+  have=$("$OLLAMA_BIN" list 2>/dev/null | awk 'NR>1{sub(/:.*/,"",$1); print $1}')
+  for t in "$@"; do
+    grep -qx "$t" <<<"$have" && { echo "$t"; return; }
+  done
+  echo "$1"
+}
+
 case "${1:-chat}" in
   start) start ;;
-  stop)  pkill -f "$OLLAMA_BIN serve" && echo stopped ;;
+  # `|| true`: nothing running is a successful stop, not an error under set -e.
+  stop)  pkill -f "$OLLAMA_BIN serve" && echo stopped || true ;;
   # 64K at full GPU offload, ~34 tok/s
-  chat)  start; "$OLLAMA_BIN" run qwen3_5_9b_iq3:latest ;;
+  chat)  start; "$OLLAMA_BIN" run "$(pick qwen35-fast qwen3_5_9b_iq3)" ;;
   # better quality; keep ctx <= 16K to stay fully on the GPU
-  hq)    start; "$OLLAMA_BIN" run qwen35-defiant-q4km ;;
+  hq)    start; "$OLLAMA_BIN" run "$(pick qwen35-quality qwen35-defiant-q4km)" ;;
   # IQ3_M + mmproj-F16; pass an image path in the prompt to use it
-  see)   start; "$OLLAMA_BIN" run qwen35-vision ;;
+  see)   start; "$OLLAMA_BIN" run "$(pick qwen35-vision)" ;;
   # web chat UI + OpenAI-compatible API on :8181
   web)   start
          pkill -f "chat.py --port 8181" 2>/dev/null || true
