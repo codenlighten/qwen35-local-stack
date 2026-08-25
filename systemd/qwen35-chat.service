@@ -7,7 +7,9 @@ Wants=ollama-qwen35.service
 Type=simple
 WorkingDirectory=__DIR__
 ExecStart=/usr/bin/python3 __DIR__/chat.py --port __PORT__
-Restart=on-failure
+# always, not on-failure: a clean exit from chat.py would otherwise
+# leave the API down with systemd reporting success.
+Restart=always
 RestartSec=5
 
 [Install]
