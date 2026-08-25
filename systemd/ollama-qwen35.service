@@ -10,7 +10,9 @@ Environment=OLLAMA_HOST=127.0.0.1:__PORT__
 # Both required for the documented context ceilings (halves the KV cache).
 Environment=OLLAMA_FLASH_ATTENTION=1
 Environment=OLLAMA_KV_CACHE_TYPE=q8_0
-Restart=on-failure
+# always, not on-failure: ollama exited cleanly after four days and
+# systemd left it down, taking the chat shim with it.
+Restart=always
 RestartSec=5
 TimeoutStartSec=300
 
