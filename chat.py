@@ -26,6 +26,7 @@ MODELS = {
     "qwen35-quality": {"tags": ["qwen35-quality", "qwen35-defiant-q4km"],
                        "ctx": 16384, "vision": False},
     "qwen35-vision":  {"tags": ["qwen35-vision"], "ctx": 16384, "vision": True},
+    "qwen36-27b":     {"tags": ["qwen36-27b"], "ctx": 16384, "vision": True},
     "qwen35-q6":      {"tags": ["qwen35-q6"], "ctx": 16384, "vision": False},
     "qwen35-q8":      {"tags": ["qwen35-q8"], "ctx": 16384, "vision": False},
 }
