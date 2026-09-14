@@ -229,6 +229,7 @@ class Handler(BaseHTTPRequestHandler):
         msgs = []
         for m in b.get("messages", []):
             msgs.append(normalize_message(m))
+        msgs = one_image_per_message(msgs)
 
         payload = build_payload(spec, msgs, opts, think, fmt, stream)
         cid = "chatcmpl-" + uuid.uuid4().hex[:24]
@@ -316,7 +317,7 @@ class Handler(BaseHTTPRequestHandler):
                 "temperature": b.get("temperature", 0.7)}
         if b.get("num_predict"): opts["num_predict"] = int(b["num_predict"])
 
-        payload = build_payload(spec, b.get("messages", []), opts,
+        payload = build_payload(spec, one_image_per_message(b.get("messages", [])), opts,
                                 bool(b.get("think", True)), None, True)
         self._stream_start()
         t0 = time.time()
@@ -340,6 +341,25 @@ class Handler(BaseHTTPRequestHandler):
                            "elapsed": round(time.time() - t0, 1)})
                 break
         self._sse("[DONE]")
+
+
+def one_image_per_message(msgs):
+    """Give each of several images in a message a message of its own.
+
+    Ollama 0.32's qwen35 runner keeps only one of several same-sized images in
+    a single message: asked about red, blue and green 256px PNGs sent together,
+    the model listed red and green. One image per message is read correctly,
+    so the images go first, then the text.
+    """
+    out = []
+    for m in msgs:
+        images = m.get("images") or []
+        if len(images) > 1:
+            out += [{"role": m.get("role", "user"), "content": f"Image {n}", "images": [img]}
+                    for n, img in enumerate(images, 1)]
+            m = {k: v for k, v in m.items() if k != "images"}
+        out.append(m)
+    return out
 
 
 def normalize_message(m):
